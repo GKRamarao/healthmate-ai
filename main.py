@@ -1,9 +1,14 @@
-from flask import Flask, request, jsonify
 import os
+from flask import Flask, request, jsonify
+import google.generativeai as genai
+
+# -------- CONFIG --------
+MODEL_ID = "gemini-2.5-flash"   # <--- ONLY CHANGE THIS IF NEEDED
 
 app = Flask(__name__)
 
-# ---- Sample in-memory health logs (your sample dataset) ----
+
+# Sample data
 health_logs = [
     {
         "date": "2025-11-17",
@@ -12,83 +17,81 @@ health_logs = [
         "mood": "Tired",
         "medications": "Paracetamol",
         "sleep_hours": 6
-    },
-    {
-        "date": "2025-11-16",
-        "user_id": "user1",
-        "symptoms": "No major symptoms",
-        "mood": "Normal",
-        "medications": "None",
-        "sleep_hours": 7
     }
 ]
 
+
 @app.route("/", methods=["GET"])
 def home():
-    return "HealthMate AI backend is running!", 200
+    return f"HealthMate AI – using model: {MODEL_ID}", 200
 
 
 @app.route("/ask", methods=["GET", "POST"])
 def ask():
-    # If called from browser with GET, read question from URL ?question=...
-    if request.method == "GET":
-        question = request.args.get("question", "")
+    try:
+        # Read question
+        if request.method == "GET":
+            question = request.args.get("question", "")
+        else:
+            data = request.get_json(silent=True) or {}
+            question = data.get("question", "")
+
         if not question:
-            return (
-                "Use /ask like this in browser: "
-                "/ask?question=I+have+headache+what+should+I+do",
-                200,
-            )
-    else:
-        # POST: JSON body
-        data = request.get_json(silent=True) or {}
-        question = data.get("question", "")
+            return jsonify({"error": "Please provide 'question'"}), 400
 
-    if not question:
-        return jsonify({"error": "Please send a 'question' field"}), 400
+        # Read API key
+        api_key = os.environ.get("GOOGLE_API_KEY")
+        print("DEBUG GOOGLE_API_KEY set?:", bool(api_key))
+        print("DEBUG MODEL_ID:", MODEL_ID)
 
-    dummy_answer = (
-        f"I received your question: '{question}'. "
-        "This is a placeholder answer for now. Later this will be answered by Gemini AI."
-    )
+        if not api_key:
+            return jsonify({
+                "question": question,
+                "answer": f"(Placeholder) I received your question: '{question}'. No API key set."
+            }), 200
 
-    return jsonify({
-        "question": question,
-        "answer": dummy_answer
-    }), 200
+        # Configure Gemini and call
+        genai.configure(api_key=api_key)
+        model = genai.GenerativeModel(MODEL_ID)
 
-@app.route("/log", methods=["POST"])
-def add_log():
-    data = request.get_json(silent=True) or {}
+        prompt = (
+            "You are a friendly health & wellness assistant. "
+            "Give only general lifestyle suggestions, NOT diagnosis or prescriptions. "
+            "Always suggest seeing a doctor for serious or persistent issues.\n\n"
+            f"User question: {question}"
+        )
 
-    required_fields = ["date", "user_id", "symptoms", "mood", "medications", "sleep_hours"]
-    missing = [f for f in required_fields if f not in data]
+        response = model.generate_content(prompt)
 
-    if missing:
+        # Extract text
+        answer_text = ""
+        try:
+            answer_text = response.text.strip()
+        except AttributeError:
+            if getattr(response, "candidates", None):
+                parts = response.candidates[0].content.parts
+                answer_text = "".join(getattr(p, "text", "") for p in parts).strip()
+
+        if not answer_text:
+            answer_text = "Gemini returned an empty response. Please rephrase your question."
+
+        return jsonify({"question": question, "answer": answer_text}), 200
+
+    except Exception as e:
+        print("ERROR in /ask:", repr(e))
         return jsonify({
-            "error": "Missing required fields",
-            "missing_fields": missing
-        }), 400
-
-    health_logs.append(data)
-
-    return jsonify({
-        "message": "Health log added successfully",
-        "log": data
-    }), 201
+            "error": "Internal server error in /ask",
+            "details": str(e),
+            "model_used": MODEL_ID
+        }), 500
 
 
 @app.route("/logs", methods=["GET"])
 def get_logs():
-    user_id = request.args.get("user_id")
-
-    if user_id:
-        filtered = [log for log in health_logs if log.get("user_id") == user_id]
-        return jsonify(filtered), 200
-
     return jsonify(health_logs), 200
 
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
+    print("Starting app on port", port, "with MODEL_ID =", MODEL_ID)
     app.run(host="0.0.0.0", port=port)
